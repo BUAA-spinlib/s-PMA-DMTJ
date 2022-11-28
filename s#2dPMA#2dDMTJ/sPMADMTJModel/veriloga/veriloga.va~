@@ -1,0 +1,867 @@
+//Title: Compact model of Double-barrier Perpendicular Shape Anistropy (PSA) MTJ based on Spin transfer torque mechanism
+//Version: Beta.3.1
+//Date:8 April 2018 ~ 15 April 2018
+//Language: VerilogA
+
+/*-------------------------------------------
+Property: IEF, UMR8622, Univ.Paris Sud-CNRS
+Authors: Haotian WANG,You WANG,Yue ZHANG, Weisheng ZHAO, Yahya Lakys, Dafine Ravelosona, Jacques-Olivier Klein and Claude Chappert
+
+In this model, it takes into account the static, dynamic and stochastic behavoirs of PMA MTJ nanopillar
+
+1.MTJ resistance calculation based on brinkman model
+2.TMR dependence on the bias voltage
+3.Spin polarity calculation model for magnetic tunnel junction
+4.Critical current calculation 
+5.Dynamic model (>critical current, also sun's model)
+6.Stochastic model 
+7.Resistance variation
+8.Temperature evaluation
+
+The parameters are from the prototypes of Univ. Tohuku
+
+---------------------------------------------*/
+`resetall
+`include "constants.vams"
+`include "disciplines.vams"
+`define explimit 85.0
+`define exp(x) exp(min(max((x),-`explimit),`explimit))
+`define sqrt(x) pow( (x), 0.5)
+
+//Shape definition
+`define rec 1
+`define ellip 2
+`define circle 3
+
+/*-------------------------------------------
+Electrical Constants
+---------------------------------------------*/
+
+/*----------Elementary Charge---------------*/
+`define e 1.6e-19	
+/*----------Bohr Magnetron Costant----------*/
+`define ub 9.27e-24	
+/*----------Boltzmann Constant------------- */
+`define Kb 1.38e-26	
+/*----------Electron Mass------------- */
+`define m 9.10e-31	
+/*----------Euler's constant---------------*/
+`define C 0.577
+	
+
+module PSA_DMTJ(T1,T2,x,Ttrans,PI,Temp);
+
+inout T1, T2;
+electrical T1, T2;
+electrical n1,n2;    //virtual terminals of RC circuit for time modelisation for temperature
+
+/*----------X=store the state of the MTJ, non-volatile way------------- */
+/*----------Ttrans=store the state of the MTJ with time influence, non-volatile way------------- */
+/*----------PI=switching probability------------- */
+/*----------Temp=store the temperature------------- */
+inout x,Ttrans,PI,Temp;
+electrical x,Ttrans,PI,Temp;
+
+
+/*------------------------------------------
+MTJ Technology Parameters
+(Corresponds to the HITACHI MTJ Process)
+-------------------------------------------*/
+
+/*----------Gilbert Damping Coefficient---------------*/
+parameter real  alpha=0.005;	
+/*----------GyroMagnetic Constant in Hz/Oe---------------*/
+//g = 2.0023193;
+//u_B = 9.27*10^(-24); %J/T
+//h_bar = 1.054*10^(-34);%J*s
+//gamma = g*u_B/h_bar;
+parameter real  gamma=1.76e11;	
+/*----------Electron Polarization Percentage % ---------------*/
+parameter real  P=0.57;												
+///*----------Out of plane Magnetic Anisotropy in Oersteds---------------*/
+//parameter real  Hk=1433;		
+/*----------Saturation Field in the Free Layer in Oersteds---------------*/
+parameter real  Ms=1209616;	//15200*79.58	
+/*----------The Energy Barrier Height for MgO in electron-volt---------------*/
+parameter real  PhiBas=0.4;	
+/*----------Voltage bias when the TMR(real) is 1/2TMR(0) in Volt---------------*/
+parameter real  Vh=0.5;		//experiental value with MgO barrier
+
+
+/*------------------------------------------
+Device Parameters
+(Corresponds to the HITACHI 240 x 80 MTJ)
+-------------------------------------------*/
+/*----------Height of the Free Layer  in nm---------------*/
+parameter real  tsl=15e-9 from[0.7e-9:30e-9];
+/*----------Length in nm---------------*/
+parameter real  a=10e-9;
+/*----------Width in nm---------------*/
+parameter real  b=10e-9;
+/*----------Radius in nm---------------*/
+parameter real  r=5.25e-9;
+/*----------Height of the Oxide Barrier in nm---------------*/
+parameter real  toxb=8.5e-10 from[8e-10:2e-9];
+parameter real  toxt=2.5e-10 from[0:3.0e-10];//另外加一个
+//需要改成DMTJ
+/*----------TMR(0) with Zero Volt Bias Voltage ---------------*/
+parameter real  TMR=1.0;
+	
+/*----------Shape of MTJ---------------*/
+parameter real 	SHAPE=3  from[1:3];  //	ROUND	
+
+/*----------Neel-Brown model parameter ---------------*/
+parameter real 	tau0=8.7e-10;	//experiental value, prototype Hitachi 2007m with CoFe layer
+	
+/*----------Error probability Ps=1-Pr(t) ----------------*/
+parameter real	Ps=0.999999;
+
+/*----------Threshold for Neel-Brown model----------------*/
+parameter real brown_threshold=0.0;
+
+/*----------MTJ State Parameters----------------*/
+/*----------Initial state of the MTJ, 0 = parallele, 1 = anti-parallele----*/
+parameter integer 	PAP=0 from[0:1];
+/*----------Room temperature in Kelvin----------------*/
+parameter real 		T= 300;//$random % 50 +323;
+
+/*----------Resistance area product in ohmum2----------------*/
+parameter real 		RA=4.5 from[4:15];
+
+
+
+/*----------Parameters of RC circuit for time modelisation for temperature---------------*/
+/*----------Heat capacity per unit volume in J/m3*K----------------*/
+parameter real 		Cv= 2.74e6  from[2.735e6:2.7805e6];
+/*----------Thermal conductivity of the thermal barrier(MgO) in W/m*K----------------*/
+parameter real 		lam= 84.897 from [84.8912:84.9449];//
+
+                   
+/*----------Total thickness of MTJ nanopillar in nm----------------*/
+parameter real 		thick_s= 3.355e-8;//
+/*----------RC circuit for time modelisation for temperature---------------*/
+parameter real resistor=100e6; //R=100M
+parameter real coeff_tau=12; //Coefficient to increase tau_th
+
+real capacitor;   //virtual capacitor
+real tau_th;        //characteristic heating/cooling time
+real temp;    //real temperature of MTJ
+real temp_init;   //temperature initialised
+real R;		//resistance of MTJ
+
+
+
+parameter real p=1.0;
+
+parameter integer STO=0 from[0:2];         //choice of stochastic dynamic, 0 no stochastic, 1 random exponential distribution,2 random gauss distribution
+
+parameter integer RV=0 from[0:2];          //choice of stochastic static intrinsically, 0 no stochastic, 1 random uniform distribution,2 random gauss distribution
+
+parameter integer DC=1 from[0:1];
+
+parameter integer Temp_var=0 from[0:1];     //choice of time modelisation for temperature
+
+parameter real DEV_toxb=1e-10;        //choice of standard deviation of stochastic static gauss distribution for tox when RV=2
+parameter real DEV_toxt=1e-11;        //choice of standard deviation of stochastic static gauss distribution for tox when RV=2
+parameter real DEV_tsl=1e-9;        //choice of standard deviation of stochastic static gauss distribution for tsl when RV=2
+parameter real DEV_TMR=1e-1;        //choice of standard deviation of stochastic static gauss distribution for TMRwhen RV=2
+
+parameter real STO_dev=1e-10;        //choice of standard deviation of stochastic dynamic gauss distribution when STO=2
+
+//variables
+
+//Polaristion constant for the two states of STT-MTJ
+//real PolaP; 	//Polarization state parallel of STT-MTJ
+//real PolaAP; 	//Polarization state anti-parallel of STT-MTJ
+real g_STT;
+
+real surface;	//Surface of MTJ
+
+//Critical current density for the two states of STT-MTJ
+real gp; 	//Critical current density for P state
+real gap;	//Critical current density for AP state
+
+
+//TMR real value for the two states of STT-MTJ
+real TMRR;	//TMR real value for P state
+real TMRRT;	//TMR real value for AP state
+
+//Resistance of MTJ
+real Rob;	//Resistance of bottom MTJ when bias voltage = 0V
+real Rot;	//Resistance of thin MTJ when bias voltage = 0V
+real Rap;	//Resistance value for AP state
+real Rp;	//Resistance value for P state
+
+//Voltage of MTJ
+real Vb;	//V(T1,T2)
+real Vc;	//V(T2,T1)
+
+real Id;	//Current of MTJ
+
+//critial current for the two states of STT-MTJ
+real IcAP; 	//Critial current for AP state
+real IcP;	//Critial current for P state
+
+integer ix;	//Current used to store the state of the MTJ
+
+real tau;	//Probability parameter
+
+real FA; //Factor for calculating the resistance based on RA
+
+integer seed;	//Used to initialize the random number generator
+
+//Stochastic effects
+real durationstatic,duration;	//time needed to be sure that the switching is effected
+
+real toxbreal;   //real thickness of bottom oxide layer
+real toxtreal;	 //real thickness of thin oxide layer
+real tslreal;	//real thickness of free layer
+real TMRreal;	//real TMR
+
+real pp;
+
+(*cds_inherited_parameter*)parameter real seedin = 0;  //generation of a real random value of seed for random distribution function modified 20140223
+
+real VPI;
+
+real P_APt;
+real AP_Pt;
+integer rec_time;
+
+	real q;
+	real qx;
+	real fx, fy,fz;
+	parameter real u_0 = 4*`M_PI*1.0e-7;
+	//parameter real Kp = -110; //kJ/m3
+	parameter real Kp = 0; //kJ/m3
+	parameter real Ki = 2.2e-6; //KJ/m2
+	real Keff;
+	real Em;
+	real EE;	//Variable of the Slonczewski model
+	real Ebm;	//test
+	real theta;
+
+analog begin
+
+	if (SHAPE==1)
+		begin
+		surface=a*b;	//SQUARE
+		end
+		else if (SHAPE==2)
+		begin
+		surface=`M_PI*a*b/4;	//ELLIPSE
+		end
+		else 
+		begin
+		surface=`M_PI*r*r;    //ROUND
+	end
+
+	Vc=V(T2,T1);	//potential between T2 and T1
+	Vb=V(T1,T2);	//potential between T2 and T1
+
+//initial conditions
+@(initial_step)
+begin
+        //$display("Vh=%g",Vh);
+	seed=1000000000*seedin;	//initialization of seed modified 20140223
+
+	FA=3322.53/RA;	//initialization of resistance factor according to RA product
+
+	if (RV==1)
+		begin
+			//real thinkness of oxide layer, free layer and real TMR considering the random distribution(uniform distribution)
+			toxbreal=$rdist_uniform(seed,toxb*0.99,toxb*1.01);
+			toxtreal=$rdist_uniform(seed,toxt*0.99,toxt*1.01);
+			tslreal=$rdist_uniform(seed,tsl*0.99,tsl*1.01);
+			TMRreal=$rdist_uniform(seed,TMR*0.99,TMR*1.01);			
+		end
+	else if (RV==2)
+		begin
+			//real thinkness of oxide layer, free layer and real TMR considering the random distribution(gauss distribution)
+			toxbreal=abs($rdist_normal(seed,toxb,DEV_toxb));
+			toxtreal=abs($rdist_normal(seed,toxt,DEV_toxt));
+			tslreal=abs($rdist_normal(seed,tsl,DEV_tsl));
+			TMRreal=abs($rdist_normal(seed,TMR,DEV_TMR));						
+		end
+	else
+		begin
+			toxbreal=toxb;
+			toxtreal=toxt;
+			tslreal=tsl;
+			TMRreal=TMR;
+		end
+	temp=T;
+        temp_init=T;
+	
+        tau_th= Cv*thick_s / (lam/thick_s);
+	
+        capacitor=coeff_tau*tau_th/resistor;	//tau_th=resistor*capacitor  
+
+	Rob=(toxbreal*1.0e10/(1.0e12*FA*`sqrt(PhiBas)*surface))*exp(1.025*toxbreal*1.0e10*`sqrt(PhiBas));	//resistance
+	Rot=(toxtreal*1.0e10/(1.0e12*FA*`sqrt(PhiBas)*surface))*exp(1.025*toxtreal*1.0e10*`sqrt(PhiBas));	//resistance
+	//Ro2 for the DMTJ ; while the TMR(v) should be ignored as smaller R? and TMR(0) the same ?
+	//Ro = Rob + Rot*(1+TMRreal);
+	//Em=Ms*tslreal*surface*Hk/2; 
+	
+
+	q = tslreal/(2*r);
+	
+	if (q>=1)
+		begin
+			qx= 1- 1/(q*q);
+			fz = ((-`sqrt(qx*qx*qx)/3-`sqrt(qx)-0.5*ln(1-`sqrt(qx))+0.5*ln(1+`sqrt(qx)))/(`sqrt(qx*qx*qx))+0.333)*(1-qx);	
+			//fy = ((-`sqrt(qx*qx*qx)/3-`sqrt(qx)-0.5*ln(1-`sqrt(qx))+0.5*ln(1+`sqrt(qx)))/(`sqrt(qx*qx*qx))+0.333);
+			fx = (1-fz)/2;
+		end
+	else
+		begin
+			fx = (q*q/(2*(1-q*q)))*((1/(q*(`sqrt(1-q*q))))*acos(q)-1);
+			fz = 1-fx*2;
+		end
+	
+	Keff = Kp - u_0*Ms*Ms*(130/126)*(1.0e-3)*(fz-fx)/2; //只是保证了Ms的单位还是Oe
+	Em = (Keff*tslreal+Ki)*surface*1000;//KJ-->J
+	
+	
+	//q = T./D;
+	//x = 1 - 1./(q.^2);
+	//f1 = ((-x.^(1.5)/3-x.^(1/2)-0.5*log(1-x.^(1/2))+0.5*log(1+x.^(1/2)))./(x.^(1.5))+1/3).*(1-x);
+	//f3 = (1-f1)/2;	
+	//Keff = Kp - u_0*(Ms^2)*trans*(f1-f3)/2;
+	//Ki = 2.2*10^(-6);%(KJ/(M^2));
+	//Umac = (Keff.*T+Ki).*((pi)*((D./2).^2)); 把这些换算成Oe的Hk好了  
+	
+	duration=0.0;
+	P_APt=0;
+	AP_Pt=0;
+
+        if(DC==0)
+	    begin
+	      //States initialisation
+	      ix=-PAP;
+	      I(x)<+ PAP;	
+	      VPI=p;
+	      I(PI)<+p;
+	    end
+        else
+	    begin
+	      ix=PAP;	
+	    end		
+
+        V(Ttrans)<+PAP;	
+        I(T1,T2)<+Id;	//Actualisation of the current of MTJ with the value calculated
+	
+end
+
+
+if(Temp_var==0)
+   begin
+      temp=temp_init;        //temperature constant    
+   end
+else
+   begin
+      temp=V(Temp);          //time modelisation for temperature
+   end   
+   
+//EE=Em/(`Kb*temp*40*`M_PI);  //result of E/kbT//这样改了会不会很麻烦
+EE=Em/(`Kb*temp);  //result of E/kbT//可以考虑在这修改40*pi那个
+Ebm=Em*1.0e22;
+	theta = `sqrt(0.5/EE);
+
+if(DC==1)
+	begin	
+
+		if(ix==0)	//Case which the magnetizations of the two layers are parallel
+			begin		
+				TMRR=TMRreal/(1+Vb*Vb/(Vh*Vh));	//TMRR没有用到？
+
+				//Parallel resistance
+				Rp=Rob + Rot*(1+TMRreal);
+				R=Rp;
+				Id=Vb/Rp;
+		
+				//Calcul of critical current
+				//PolaP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state parallel
+				g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));   //DMTJ P和PolaP不一样
+				gp=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density      
+				IcP=gp*surface;	
+
+				if(Vb<(IcP*Rp))		
+					begin
+						ix=0.0;
+
+					end
+				else
+					begin
+						ix=1.0;
+
+					end
+			end
+		else
+			begin				
+				//TMR real
+				TMRRT=TMRreal/(1+Vb*Vb/(Vh*Vh));	
+
+				// Antiparallel resistance 
+				Rap=Rob*(1+TMRRT)+Rot;
+				R=Rap;
+				Id=Vb/(Rap);
+				//PolaAP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state anti parallel
+				//gap=alpha*gamma*`e*Ms*tslreal*Hk/(40*`M_PI*(`ub*PolaAP));  	//Critical current density
+				g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));   //DMTJ P和PolaP不一样
+				gap=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density    
+				IcAP=gap*surface; 	// Critical current 	
+
+				if(Vc>=(IcAP*Rap))
+					begin
+						ix=0.0;
+					end
+			end		
+                V(Ttrans)<+ix;	
+                I(T1,T2)<+Id;	//Actualisation of the current of MTJ with the value calculated
+        end				
+else
+	begin
+
+        if(STO==1||STO==2)
+         begin
+
+	if(I(Ttrans)==0)	//Case which the magnetizations of the two layers are parallel
+		begin
+
+			if (pp==1)
+				begin
+					VPI=1;
+					pp=0;
+				end
+
+			//TMR real 
+			TMRR=TMRreal/(1+Vb*Vb/(Vh*Vh));	
+
+			//Parallel resistance
+			Rp=Rob+Rot*(1+TMRreal);
+			R=Rp;
+			Id=Vb/Rp;
+
+			if(ix==0)		//Dynamic=parallel state,static=parallel state
+				begin
+
+					//Calcul of critical current
+					//PolaP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state parallel
+
+					//gp=alpha*gamma*`e*Ms*tslreal*Hk/(40*`M_PI*(`ub*PolaP)); 	//Critical current density 
+					g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));  // DMTJ P和PolaP不一样
+					gp=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density    					
+					IcP=gp*surface;		// Critical current 		
+
+					if(Vb>=IcP*Rp)		
+						begin	//Current higher than critical current
+						
+						
+							//STT-MTJ dynamic behavior : Sun model
+
+							//Time needed to be sure that the switching is effected
+							durationstatic=(`C+ln(`M_PI*`M_PI*(EE)/4))*`e*Ms*surface*tslreal*(1+P*P)/(2*`ub*P*abs(Id-IcP));
+						//1000对应的可能是电流的mA;10000对应的是uB；40*pi对应的是Em从Oe*Oe到J的转化；这个程序单位其实很乱
+						//不过Ms的单位倒是用的Oe
+							if(STO==1)
+								begin
+									duration=abs($rdist_exponential(seed, durationstatic));	//stochastic effect(exponential distribution)
+								end
+							else if(STO==2)
+							        begin
+									duration=abs($rdist_normal(seed,durationstatic,STO_dev));	//stochastic effect(gauss distribution)
+									
+								end
+								
+							else
+								begin
+									duration=durationstatic;
+								end
+							
+							if(duration<($abstime-P_APt))	
+								begin	//Switching of the free layer always occurs 
+													
+									if(duration>VPI)
+										begin
+											ix=-1.0;   //change the current state of MTJ
+											pp=1;
+										end
+									else
+										begin
+											VPI=duration;	
+											duration= 100000000;	
+										end
+
+								end
+						end
+
+					else		
+						begin	//Current smaller than critical current
+
+				    			ix=0.0;	//save the current state of MTJ
+							//STT-MTJ dynamic behavior : Neel-Brown model
+							//tau=tau0*exp(Em*(1-abs(Id/IcP))/(`Kb*temp*40*`M_PI));
+							tau=tau0*exp(Em*(1-abs(Id/IcP))/(`Kb*temp));//把后面的单位转化去掉了
+							if(Vb>brown_threshold)	
+								begin
+									if (Vb<0.8*IcP*Rp)
+										begin
+									
+											if(STO==1)
+												begin
+													duration=abs($rdist_exponential(seed, tau));	//stochastic effect
+												end
+											else if(STO==2)
+							                                        begin
+									                                duration=abs($rdist_normal(seed, durationstatic,STO_dev));	//stochastic effect(gauss distribution)
+											        end   
+											else
+												begin
+													duration=tau;
+												end										
+
+
+						
+											if (($abstime-P_APt) > duration)	
+					  							begin
+													if(VPI<=duration)
+														begin
+															ix=-1.0;   //change the current state of MTJ
+														end
+													else
+														begin
+															VPI=duration;							
+															duration= 100000000;	
+														end
+												end
+										end 			
+								end
+						end
+				end
+
+	end
+
+
+	if(I(Ttrans)!=0)  	//Case which the magnetizations of the two layers are antiparallel
+		begin
+	
+			if (pp==1)
+				begin
+					VPI=1;
+					pp=0;
+				end
+		
+			//TMR real
+			TMRRT=TMRreal/(1+Vb*Vb/(Vh*Vh));	
+			// Antiparallel resistance 
+			Rap=Rob*(1+TMRRT)+Rot;
+			R=Rap;
+			Id=Vb/(Rap);
+
+			if(ix!=0)
+				begin 
+	
+					//PolaAP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state anti parallel
+					//gap=alpha*gamma*`e*Ms*tslreal*Hk/(40*`M_PI*(`ub*PolaAP));  	//Critical current density
+					g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));   //DMTJ P和PolaP不一样
+					gap=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density 
+					IcAP=gap*surface; 	// Critical current 	
+
+					if(Vc>=(IcAP*Rap))
+						begin	//Current higher than critical current
+
+							//STT-MTJ dynamic behavior : Sun model
+							durationstatic=(`C+ln(`M_PI*`M_PI*(Em/(`Kb*temp))/4))*`e*Ms*surface*tslreal*(1+P*P)/(2*`ub*P*abs(-Id-IcAP));
+						
+							//time needed to be sure that the switching is effected
+							if(STO==1)
+								begin
+									duration=abs($rdist_exponential(seed, durationstatic));	//stochastic effect
+								end
+							else if(STO==2)
+							        begin
+							                duration=abs($rdist_normal(seed, durationstatic,STO_dev));	//stochastic effect(gauss distribution)
+									
+			                                        end
+							else
+								begin
+									duration=durationstatic;
+								end
+
+
+							if(duration<($abstime-AP_Pt))  
+								begin	//Switching of the free layer always occurs 	
+					
+									if(VPI<=duration)
+										begin
+											ix=0.0;   //change the current state of MTJ	
+											pp=1;
+										end
+									else
+										begin
+											VPI=duration;						
+											duration= $abstime-AP_Pt;	
+										end
+		
+								end 
+						end
+					else		
+						begin	//Current smaller than critical current
+
+	    						ix=-1.0;	//save the current state of MTJ
+							//STT-MTJ dynamic behavior : Neel-Brown model
+							tau=tau0*exp(Em*(1-abs(Id/IcAP))/(`Kb*temp));
+			
+							if(Vc>brown_threshold)	
+								begin
+									if (Vc<0.8*IcAP*Rap)
+										begin
+											if(STO==1)
+												begin
+												
+													duration=abs($rdist_exponential(seed, tau));	//stochastic effect
+                                                                                                end
+											else if(STO==2)
+							                                        begin
+									                                duration=abs($rdist_normal(seed, durationstatic,STO_dev));	//stochastic effect(gauss distribution)											       
+												end      
+												
+											else
+												begin
+													duration=tau;
+												end	
+
+
+											if (duration<($abstime-AP_Pt))	
+					  							begin
+							
+													if(VPI<=duration)
+														begin
+															ix=0.0;   //change the current state of MTJ
+														end
+													else
+														begin
+															VPI=duration;							
+															duration= 100000000;	
+														end
+
+												end
+										end 
+			
+								end
+						end
+
+				end
+
+	end
+
+end
+
+else
+begin
+
+if(I(Ttrans)==0)	//Case which the magnetizations of the two layers are parallel
+					//不跑蒙特卡洛仿真的话 除了DC=1那部分 就是这部分了
+		begin
+		
+
+			if (pp==1)
+				begin
+					VPI=1;
+					pp=0;
+				end
+
+			//TMR real 
+			TMRR=TMRreal/(1+Vb*Vb/(Vh*Vh));	
+
+			//Parallel resistance
+			Rp=Rob+Rot*(1+TMRreal);
+			R=Rp;
+			Id=Vb/Rp;
+					//Calcul of critical current
+					//PolaP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state parallel
+
+					//gp=alpha*gamma*`e*Ms*tslreal*Hk/(40*`M_PI*(`ub*PolaP)); 	//Critical current density  
+					g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));  // DMTJ P和PolaP不一样
+					gp=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density 
+					IcP=gp*surface;		// Critical current 		
+
+					if(Vb>=IcP*Rp)		
+						begin	//Current higher than critical current						       
+							//STT-MTJ dynamic behavior : Sun model
+                                                       
+							//Time needed to be sure that the switching is effected
+							durationstatic=(`C+ln(`M_PI*`M_PI*(Em/(`Kb*temp))/4000))*`e*Ms*surface*tslreal*(1+P*P)/(2*`ub*P*abs(Id-IcP));
+													
+							duration=durationstatic;
+
+							if(duration<($abstime-P_APt))	
+								begin	//Switching of the free layer always occurs 
+													
+									ix=-1.0;   //change the current state of MTJ									
+								
+											
+								end
+							else
+								begin
+									ix=0.0;	
+								end
+								
+						end
+					else		
+						begin	//Current smaller than critical current
+
+				    			ix=0.0;	//save the current state of MTJ
+							//STT-MTJ dynamic behavior : Neel-Brown model
+							tau=tau0*exp(Em*(1-abs(Id/IcP))/(`Kb*temp));
+						
+							if(Vb>brown_threshold)	
+								begin
+									if (Vb<0.8*IcP*Rp)
+										begin
+									
+											duration=tau;
+			
+											if (($abstime-P_APt) > duration)	
+					  							begin
+													
+													ix=-1.0;   //change the current state of MTJ
+												end
+											else
+												begin
+													ix=0.0;
+												end
+												
+										end 			
+								end
+						 end
+	        end
+
+	else if(I(Ttrans)!=0)  	//Case which the magnetizations of the two layers are antiparallel
+
+		begin
+	
+			if (pp==1)
+				begin
+					VPI=1;
+					pp=0;
+				end
+		
+			//TMR real
+			TMRRT=TMRreal/(1+Vb*Vb/(Vh*Vh));	
+
+			// Antiparallel resistance 
+			Rap=Rob*(1+TMRRT)+Rot;
+			R=Rap;
+			Id=Vb/(Rap);
+
+			
+	
+					//PolaAP=`sqrt(TMRreal*(TMRreal+2))/(2*(TMRreal+1));  	//Polarization state anti parallel
+					//gap=alpha*gamma*`e*Ms*tslreal*Hk/(40*`M_PI*(`ub*PolaAP));  	//Critical current density
+					g_STT = P/(1-(P*P*P*P)*((cos(theta))*(cos(theta))));   //DMTJ P和PolaP不一样
+					gap=2*alpha*gamma*`e*Em/(surface*`ub*g_STT); 	//Critical current density 
+					IcAP=gap*surface; 	// Critical current 	
+                                    
+					if(Vc>=(IcAP*Rap))
+						begin	//Current higher than critical current
+
+							//STT-MTJ dynamic behavior : Sun model
+							durationstatic=(`C+ln(`M_PI*`M_PI*(Em/(`Kb*temp))/4000))*`e*Ms*surface*tslreal*(1+P*P)/(2*`ub*P*abs(-Id-IcAP));							
+							duration=durationstatic;  //time needed to be sure that the switching is effected
+							                                                
+							if(duration<($abstime-AP_Pt))  
+								begin	//Switching of the free layer always occurs 	
+					
+									ix=0.0;   //change the current state of
+// MTJ	
+																				
+								end
+							else
+								begin
+									ix=-1.0;
+									
+								end								 
+						end
+					else		
+						begin	//Current smaller than critical current
+						     
+	    						ix=-1.0;	//save the current state of MTJ
+							//STT-MTJ dynamic behavior : Neel-Brown model
+							tau=tau0*exp(Em*(1-abs(Id/IcAP))/(`Kb*temp));
+			
+							if(Vc>brown_threshold)
+							        
+								begin
+									if (Vc<0.8*IcAP*Rap)
+									
+										begin
+											
+											duration=tau;
+											if (duration<($abstime-AP_Pt))	
+					  							begin
+													ix=0.0;   //change the current state of MTJ
+														
+												end
+											else
+												begin
+													ix=-1.0;	
+												end
+
+												
+										end 
+			
+								end
+						end	
+
+	end
+
+end
+
+@(cross(Id-IcP,+1))
+begin
+	P_APt = $abstime;
+end
+
+@(cross(-Id-IcAP,+1))
+begin
+	AP_Pt = $abstime;  	
+end
+
+
+I(x)<+ix;	//Actualisation of the state of x with the value calculated
+//I(x)<+EE;
+//I(Ttrans)<+ix;
+
+//Ttrans has the same function than x but it includes the time effects 
+I(Ttrans)<+transition(ix,0,1e-14,1e-14);	
+//I(Ttrans)<+EE	;
+
+
+I(T1,T2)<+Id;	//Actualisation of the current of MTJ with the value calculated
+
+I(PI)<+VPI;
+
+if(Temp_var==1)
+    begin 
+      //Definition of the maximum incrase of temperature
+      V(n1) <+ ( V(T1,T2)*V(T1,T2) )/ ( R*surface*lam/(thick_s ));	
+
+      // RC circuit definition
+      I(n1,n2) <+ V(n1,n2) / resistor;	//RC circuit parallel
+      I(n2) <+ capacitor * (ddt(V(n2)));
+
+      V(Temp) <+  V(n2) + temp_init;
+    end
+else
+    begin 
+      V(Temp) <+  temp_init;
+    end
+end
+
+end
+
+endmodule
+
+
