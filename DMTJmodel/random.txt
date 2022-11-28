@@ -1,0 +1,7 @@
+integer seed;
+reg [7:0] rand_num;
+initial? begin seed = 1; end
+always @(posedge clk) begin rand_num <= $random(seed); end
+deposit top.seed 2 -after 1ns
+run 125ns
+exit
